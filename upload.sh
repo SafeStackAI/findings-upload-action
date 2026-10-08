@@ -196,7 +196,7 @@ if [ -n "${status_url}" ]; then
 fi
 
 if [ "${upload_status}" = "skipped" ]; then
-  skip_reason="$(echo "${body}" | jq -r '.upload.errors[0].reason // "ref_not_tracked"' 2>/dev/null || echo "ref_not_tracked")"
+  skip_reason="$(echo "${body}" | jq -r '.upload.status_reason // "unknown_reason"' 2>/dev/null || echo "unknown_reason")"
   notice "upload skipped: ${skip_reason}"
 fi
 
@@ -227,7 +227,8 @@ if is_pending "${upload_status}" && [ -n "${status_url}" ]; then
 fi
 
 if [ "${final_status}" = "failed" ]; then
-  fail_or_warn "processing failed for upload ${upload_id}"
+  failure_reason="$(echo "${body}" | jq -r '.upload.status_reason // "unknown_reason"' 2>/dev/null || echo "unknown_reason")"
+  fail_or_warn "processing failed for upload ${upload_id}: ${failure_reason}"
 fi
 
 if [ "${final_status}" = "completed" ]; then

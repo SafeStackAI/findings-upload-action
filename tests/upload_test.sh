@@ -235,6 +235,33 @@ else
   report "warnings are surfaced as ::warning::" 1 "rc=${rc} out=${out}"
 fi
 
+# --- skip reason reads status_reason, not an unrelated drop reason -----
+
+common_env
+export INPUT_TOKEN="${token_value}"
+export INPUT_REPOSITORY_ID="repo-skip-with-drop"
+rc="$(run_upload skip_reason)"
+out="$(cat "${workdir}/skip_reason.out")"
+if [ "${rc}" = "0" ] && printf '%s' "${out}" | grep -q "upload skipped: ref_not_tracked" &&
+  ! printf '%s' "${out}" | grep -q "unrelated_drop_reason"; then
+  report "skip reason reads status_reason, not errors[0].reason" 0
+else
+  report "skip reason reads status_reason, not errors[0].reason" 1 "rc=${rc} out=${out}"
+fi
+
+# --- failed upload surfaces status_reason and fails the job ------------
+
+common_env
+export INPUT_TOKEN="${token_value}"
+export INPUT_REPOSITORY_ID="repo-failed"
+rc="$(run_upload failed_reason)"
+out="$(cat "${workdir}/failed_reason.out")"
+if [ "${rc}" != "0" ] && printf '%s' "${out}" | grep -q "payload_corrupt"; then
+  report "failed upload surfaces status_reason and fails per fail-on-error" 0
+else
+  report "failed upload surfaces status_reason and fails per fail-on-error" 1 "rc=${rc} out=${out}"
+fi
+
 echo "----"
 echo "${pass_count} passed, ${failures} failed"
 [ "${failures}" -eq 0 ]

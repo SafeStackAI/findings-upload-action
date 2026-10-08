@@ -4,12 +4,20 @@ endpoint, for exercising upload.sh locally without network access.
 
 Usage: mock_server.py <port> <auth-log-path>
 
-Behavior is selected by the `repository` query param on POST requests:
+Behavior is selected by the `repository` query param on POST requests, or by
+the repository encoded in the upload id on GET status polls (the id is
+always `upload-<repository>`):
   repo-ok               -> 202 received, then completed on the second poll.
   repo-422              -> 422 invalid_report.
   repo-429-then-ok      -> 429 busy twice, then 202 received.
   repo-500-then-ok      -> 500 twice, then 202 received.
   repo-warnings         -> 202 skipped with a semgrep_integration_active warning.
+  repo-skip-with-drop   -> 202 skipped with status_reason ref_not_tracked AND
+                            an unrelated per-finding drop in errors[], to
+                            check the action reads status_reason rather than
+                            errors[0].reason.
+  repo-failed           -> 202 received, then status_reason payload_corrupt
+                            on the first poll.
   anything else         -> 202 received, then completed on the second poll.
 
 Every Authorization header received on a POST is appended to the auth log
@@ -24,11 +32,12 @@ from urllib.parse import parse_qs, urlparse
 STATE = {"retry_counts": {}, "poll_counts": {}, "auth_log": "/dev/null"}
 
 
-def upload_payload(upload_id, repository, status, warnings=None, errors=None):
+def upload_payload(upload_id, repository, status, status_reason=None, warnings=None, errors=None):
     return {
         "upload": {
             "id": upload_id,
             "status": status,
+            "status_reason": status_reason,
             "status_url": f"/api/ingest/uploads/{upload_id}",
             "repository": repository,
             "ref": "refs/heads/main",
@@ -66,6 +75,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path.startswith("/api/ingest/uploads/"):
             upload_id = parsed.path.rsplit("/", 1)[-1]
+            if upload_id == "upload-repo-failed":
+                self._send_json(
+                    200, upload_payload(upload_id, "repo-failed", "failed", status_reason="payload_corrupt")
+                )
+                return
             count = STATE["poll_counts"].get(upload_id, 0) + 1
             STATE["poll_counts"][upload_id] = count
             status = "processing" if count < 2 else "completed"
@@ -123,7 +137,21 @@ class Handler(BaseHTTPRequestHandler):
                     "upload-warn-1",
                     repository,
                     "skipped",
+                    status_reason="ref_not_tracked",
                     warnings=["semgrep_integration_active"],
+                ),
+            )
+            return
+
+        if repository == "repo-skip-with-drop":
+            self._send_json(
+                202,
+                upload_payload(
+                    f"upload-{repository}",
+                    repository,
+                    "skipped",
+                    status_reason="ref_not_tracked",
+                    errors=[{"index": 0, "reason": "unrelated_drop_reason"}],
                 ),
             )
             return
