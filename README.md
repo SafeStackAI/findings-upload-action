@@ -114,8 +114,9 @@ too large.
 
 On `429` (rate limited or over quota) or a `5xx`/network error, the action
 retries up to 3 times with backoff, honoring the API's `retry_after` value
-when present. A `4xx` response (bad input, auth, or a parse error) fails
-immediately with the API's error code and detail; it is never retried.
+when present (clamped to 1-60 seconds). A `4xx` response (bad input, auth,
+or a parse error) fails immediately with the API's error code and detail;
+it is never retried.
 
 While polling the status URL after a successful upload, a `429` or
 `5xx`/network response is retried the same way, within the existing

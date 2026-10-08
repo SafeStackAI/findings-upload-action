@@ -10,18 +10,37 @@ MAX_COMPRESSED_BYTES=$((25 * 1024 * 1024))
 MAX_RETRIES=3
 POLL_INTERVAL_SECONDS=3
 POLL_MAX_ATTEMPTS=10
+RETRY_AFTER_MIN_SECONDS=1
+RETRY_AFTER_MAX_SECONDS=60
+MAX_WORKFLOW_MESSAGE_LEN=500
+
+# escape_workflow_command encodes text for safe interpolation into a GitHub
+# Actions workflow command (::error::, ::warning::, ::notice::), per GitHub's
+# documented escaping (% -> %25, CR -> %0D, LF -> %0A), and caps its length
+# so a server-provided string can't inject extra command lines into the job
+# log or blow up the log with unbounded text.
+escape_workflow_command() {
+  local s="$1"
+  s="${s//%/%25}"
+  s="${s//$'\r'/%0D}"
+  s="${s//$'\n'/%0A}"
+  if [ "${#s}" -gt "${MAX_WORKFLOW_MESSAGE_LEN}" ]; then
+    s="${s:0:${MAX_WORKFLOW_MESSAGE_LEN}}...(truncated)"
+  fi
+  printf '%s' "${s}"
+}
 
 die() {
-  echo "::error::$1"
+  echo "::error::$(escape_workflow_command "$1")"
   exit 1
 }
 
 warn() {
-  echo "::warning::$1"
+  echo "::warning::$(escape_workflow_command "$1")"
 }
 
 notice() {
-  echo "::notice::$1"
+  echo "::notice::$(escape_workflow_command "$1")"
 }
 
 fail_or_warn() {
@@ -50,6 +69,15 @@ error_code_of() {
   echo "$1" | jq -r '.error // "unknown_error"' 2>/dev/null || echo unknown_error
 }
 
+# print_warnings emits each string in a JSON array of warnings as its own
+# ::warning::.
+print_warnings() {
+  local warnings_json="$1"
+  while IFS= read -r w; do
+    [ -n "${w}" ] && warn "${w}"
+  done < <(echo "${warnings_json}" | jq -r '.[]')
+}
+
 set_output() {
   echo "$1=$2" >>"${GITHUB_OUTPUT}"
 }
@@ -67,7 +95,7 @@ fail_on_error="${INPUT_FAIL_ON_ERROR:-true}"
 
 [ -f "${file}" ] || die "file not found: ${file}"
 
-workdir="$(mktemp -d)"
+workdir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/findings-upload.XXXXXX")"
 trap 'rm -rf "${workdir}"' EXIT
 
 gz_file="${workdir}/report.gz"
@@ -86,7 +114,7 @@ else
   : "${ACTIONS_ID_TOKEN_REQUEST_URL:?OIDC requires permissions: id-token: write}"
   : "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:?OIDC requires permissions: id-token: write}"
   oidc_response="$(curl --silent --show-error --fail \
-    --url "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${audience}" \
+    --url "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=$(urlencode "${audience}")" \
     --header "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}")" || die "failed to request OIDC token"
   id_token="$(echo "${oidc_response}" | jq -r '.value // empty')"
   [ -n "${id_token}" ] || die "OIDC token request returned no value"
@@ -143,6 +171,21 @@ get_status() {
   fi
 }
 
+# clamp_retry_after validates that $1 is a non-negative integer and clamps
+# it to [RETRY_AFTER_MIN_SECONDS, RETRY_AFTER_MAX_SECONDS]; prints nothing
+# (so the caller's own attempt-based backoff is used instead) when $1 is
+# empty or not a plain integer, which also protects `sleep` from a
+# negative or non-numeric value that would otherwise make it fail.
+clamp_retry_after() {
+  case "$1" in
+  '' | *[!0-9]*) return ;;
+  esac
+  local seconds="$1"
+  [ "${seconds}" -lt "${RETRY_AFTER_MIN_SECONDS}" ] && seconds="${RETRY_AFTER_MIN_SECONDS}"
+  [ "${seconds}" -gt "${RETRY_AFTER_MAX_SECONDS}" ] && seconds="${RETRY_AFTER_MAX_SECONDS}"
+  printf '%s' "${seconds}"
+}
+
 attempt=0
 while :; do
   attempt=$((attempt + 1))
@@ -154,7 +197,8 @@ while :; do
   429)
     [ "${attempt}" -ge "${MAX_RETRIES}" ] && break
     retry_after="$(jq -r '.retry_after // empty' "${body_file}" 2>/dev/null || true)"
-    sleep_for="${retry_after:-$((attempt * 2))}"
+    sleep_for="$(clamp_retry_after "${retry_after}")"
+    sleep_for="${sleep_for:-$((attempt * 2))}"
     warn "upload rate limited (429); retrying in ${sleep_for}s (attempt ${attempt}/${MAX_RETRIES})"
     sleep "${sleep_for}"
     ;;
@@ -189,10 +233,7 @@ upload_id="$(echo "${body}" | jq -r '.upload.id // empty')"
 status_url="$(echo "${body}" | jq -r '.upload.status_url // empty')"
 upload_status="$(echo "${body}" | jq -r '.upload.status // empty')"
 warnings_json="$(echo "${body}" | jq -c '.upload.warnings // []')"
-
-while IFS= read -r w; do
-  [ -n "${w}" ] && warn "${w}"
-done < <(echo "${warnings_json}" | jq -r '.[]')
+print_warnings "${warnings_json}"
 
 if [ -n "${status_url}" ]; then
   case "${status_url}" in
@@ -234,6 +275,12 @@ if is_pending "${upload_status}" && [ -n "${status_url}" ]; then
     *) ;;
     esac
   done
+  case "${http_status_code}" in
+  2??)
+    warnings_json="$(echo "${body}" | jq -c '.upload.warnings // []')"
+    print_warnings "${warnings_json}"
+    ;;
+  esac
   if is_pending "${final_status}"; then
     notice "upload ${upload_id} is still ${final_status} after ${POLL_MAX_ATTEMPTS} polling attempts; check status-url later"
   fi

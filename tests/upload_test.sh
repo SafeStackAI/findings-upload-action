@@ -91,6 +91,35 @@ run_upload() {
   echo "${rc}"
 }
 
+# run_upload_bg <case-name> -> starts upload.sh in the background and prints
+# its pid; writes the same <case-name>.out/.outputs files as run_upload. Used
+# for cases that would otherwise block on a long sleep: the caller polls the
+# .out file for the expected line, then kills the pid.
+run_upload_bg() {
+  local case_name="$1"
+  local out_file="${workdir}/${case_name}.out"
+  local output_file="${workdir}/${case_name}.outputs"
+  : >"${output_file}"
+  : >"${out_file}"
+  GITHUB_OUTPUT="${output_file}" "${upload_script}" >"${out_file}" 2>&1 &
+  echo $!
+}
+
+# wait_for_line <file> <pattern> <max-tries> -> polls <file> for <pattern>
+# every 0.2s up to <max-tries> times; prints 1 if found, 0 otherwise.
+wait_for_line() {
+  local file="$1" pattern="$2" max_tries="$3" i=0
+  while [ "${i}" -lt "${max_tries}" ]; do
+    if grep -q -- "${pattern}" "${file}" 2>/dev/null; then
+      echo 1
+      return
+    fi
+    i=$((i + 1))
+    sleep 0.2
+  done
+  echo 0
+}
+
 output_value() {
   grep "^$2=" "${workdir}/$1.outputs" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
@@ -336,6 +365,98 @@ if [ "${rc}" = "0" ] && [ "${status}" = "completed" ]; then
   report "poll 5xx is retried within the existing bound, then succeeds" 0
 else
   report "poll 5xx is retried within the existing bound, then succeeds" 1 "rc=${rc} status=${status} out=${out}"
+fi
+
+# --- warnings are re-checked on the final poll response -----------------
+
+common_env
+export INPUT_TOKEN="${token_value}"
+export INPUT_REPOSITORY_ID="repo-warn-on-complete"
+rc="$(run_upload warn_on_complete)"
+out="$(cat "${workdir}/warn_on_complete.out")"
+if [ "${rc}" = "0" ] && printf '%s' "${out}" | grep -q "::warning::warning_on_complete"; then
+  report "warnings are re-checked on the final poll response" 0
+else
+  report "warnings are re-checked on the final poll response" 1 "rc=${rc} out=${out}"
+fi
+
+# --- audience is urlencoded on the OIDC token request -------------------
+
+common_env
+export INPUT_REPOSITORY_ID="repo-ok-oidc-audience"
+export INPUT_AUDIENCE="https://example.com/a b&c"
+export ACTIONS_ID_TOKEN_REQUEST_URL="${base_url}/oidc-token?x=1"
+export ACTIONS_ID_TOKEN_REQUEST_TOKEN="fake-runner-token"
+: >"${auth_log}.oidc"
+rc="$(run_upload audience_encoding)"
+oidc_request="$(tail -1 "${auth_log}.oidc" 2>/dev/null || true)"
+if [ "${rc}" = "0" ] && printf '%s' "${oidc_request}" | grep -q "audience=https%3A%2F%2Fexample.com%2Fa%20b%26c" &&
+  ! printf '%s' "${oidc_request}" | grep -q "audience=https://example.com/a b&c"; then
+  report "audience is urlencoded on the OIDC token request" 0
+else
+  report "audience is urlencoded on the OIDC token request" 1 "rc=${rc} oidc_request=${oidc_request}"
+fi
+
+# --- retry_after is validated: a negative value falls back safely ------
+
+common_env
+export INPUT_TOKEN="${token_value}"
+export INPUT_REPOSITORY_ID="repo-429-negative-retry-after"
+rc="$(run_upload retry_after_negative)"
+out="$(cat "${workdir}/retry_after_negative.out")"
+upload_id="$(output_value retry_after_negative upload-id)"
+if [ "${rc}" = "0" ] && [ -n "${upload_id}" ] && ! printf '%s' "${out}" | grep -q "retrying in -5s"; then
+  report "negative retry_after falls back to the action's own backoff" 0
+else
+  report "negative retry_after falls back to the action's own backoff" 1 "rc=${rc} upload_id=${upload_id} out=${out}"
+fi
+
+# --- retry_after above the ceiling is clamped before sleeping ----------
+
+common_env
+export INPUT_TOKEN="${token_value}"
+export INPUT_REPOSITORY_ID="repo-429-huge-retry-after"
+pid="$(run_upload_bg retry_after_clamp)"
+found="$(wait_for_line "${workdir}/retry_after_clamp.out" "retrying in 60s" 30)"
+kill "${pid}" 2>/dev/null || true
+wait "${pid}" 2>/dev/null || true
+if [ "${found}" = "1" ]; then
+  report "retry_after above the ceiling is clamped to 60s before sleeping" 0
+else
+  report "retry_after above the ceiling is clamped to 60s before sleeping" 1 \
+    "$(cat "${workdir}/retry_after_clamp.out" 2>/dev/null)"
+fi
+
+# --- server-provided text is escaped before going into a workflow ------
+# --- command, so it can't inject extra ::error::/::warning:: lines -----
+
+common_env
+export INPUT_TOKEN="${token_value}"
+export INPUT_REPOSITORY_ID="repo-422-injection"
+rc="$(run_upload injection)"
+out="$(cat "${workdir}/injection.out")"
+error_lines="$(printf '%s\n' "${out}" | grep -c '^::error::' || true)"
+if [ "${rc}" != "0" ] && [ "${error_lines}" = "1" ] &&
+  printf '%s' "${out}" | grep -q '%0A::error::injected from server%0D::warning::also injected 50%25 done'; then
+  report "server text is escaped so it can't inject workflow commands" 0
+else
+  report "server text is escaped so it can't inject workflow commands" 1 \
+    "rc=${rc} error_lines=${error_lines} out=${out}"
+fi
+
+# --- the temp workdir is created under RUNNER_TEMP ----------------------
+
+common_env
+export INPUT_TOKEN="${token_value}"
+export INPUT_REPOSITORY_ID="repo-ok"
+export RUNNER_TEMP="${workdir}/no-such-runner-temp"
+rc="$(run_upload runner_temp)"
+out="$(cat "${workdir}/runner_temp.out")"
+unset RUNNER_TEMP
+if [ "${rc}" != "0" ] && printf '%s' "${out}" | grep -qi "no-such-runner-temp"; then
+  report "the temp workdir is created under RUNNER_TEMP" 0
+else
+  report "the temp workdir is created under RUNNER_TEMP" 1 "rc=${rc} out=${out}"
 fi
 
 echo "----"

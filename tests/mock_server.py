@@ -7,28 +7,44 @@ Usage: mock_server.py <port> <auth-log-path>
 Behavior is selected by the `repository` query param on POST requests, or by
 the repository encoded in the upload id on GET status polls (the id is
 always `upload-<repository>`):
-  repo-ok               -> 202 received, then completed on the second poll.
-  repo-422              -> 422 invalid_report.
-  repo-429-then-ok      -> 429 busy twice, then 202 received.
-  repo-500-then-ok      -> 500 twice, then 202 received.
-  repo-warnings         -> 202 skipped with a semgrep_integration_active warning.
-  repo-skip-with-drop   -> 202 skipped with status_reason ref_not_tracked AND
-                            an unrelated per-finding drop in errors[], to
-                            check the action reads status_reason rather than
-                            errors[0].reason.
-  repo-failed           -> 202 received, then status_reason payload_corrupt
-                            on the first poll.
-  repo-needs-confirmation -> 202 received, completed with reconciled false /
-                            reconcile_reason needs_confirmation on the 2nd
-                            poll.
-  repo-poll-403         -> 202 received, then every poll returns 403.
-  repo-poll-404         -> 202 received, then every poll returns 404.
-  repo-poll-500-then-ok -> 202 received, polls 500 twice, then completes
-                            normally.
-  anything else         -> 202 received, then completed on the second poll.
+  repo-ok                    -> 202 received, then completed on 2nd poll.
+  repo-422                   -> 422 invalid_report.
+  repo-422-injection         -> 422 with a detail field containing CR/LF and
+                                 `::` workflow-command-like text, to check
+                                 the action escapes it rather than passing
+                                 it through raw.
+  repo-429-then-ok           -> 429 busy twice, then 202 received.
+  repo-429-huge-retry-after  -> 429 forever, with a retry_after far above
+                                 any sane ceiling, to check the action
+                                 clamps it before sleeping.
+  repo-429-negative-retry-after -> 429 once with a negative retry_after,
+                                 then 202 received, to check the action
+                                 falls back to its own backoff instead of
+                                 passing the negative value to sleep.
+  repo-500-then-ok           -> 500 twice, then 202 received.
+  repo-warnings              -> 202 skipped with a warning, at create time.
+  repo-skip-with-drop        -> 202 skipped with status_reason
+                                 ref_not_tracked AND an unrelated per-finding
+                                 drop in errors[], to check the action reads
+                                 status_reason rather than errors[0].reason.
+  repo-failed                -> 202 received, then status_reason
+                                 payload_corrupt on the first poll.
+  repo-needs-confirmation    -> 202 received, completed with reconciled
+                                 false / reconcile_reason needs_confirmation
+                                 on the 2nd poll.
+  repo-poll-403              -> 202 received, then every poll returns 403.
+  repo-poll-404              -> 202 received, then every poll returns 404.
+  repo-poll-500-then-ok      -> 202 received, polls 500 twice, then
+                                 completes normally.
+  repo-warn-on-complete      -> 202 received with no warnings, completed
+                                 with a warning on the 2nd poll.
+  anything else              -> 202 received, then completed on 2nd poll.
 
 Every Authorization header received on a POST is appended to the auth log
 file, one per line, so tests can assert which credential was actually sent.
+Every GET to /oidc-token appends the request path (including its query
+string) to `<auth-log-path>.oidc`, so tests can assert the audience param
+was encoded correctly.
 """
 
 import json
@@ -97,6 +113,13 @@ def poll_response(upload_id, repository, count):
             return 200, upload_payload(upload_id, repository, "processing")
         return 200, upload_payload(upload_id, repository, "completed", extra=COMPLETED_FIELDS)
 
+    if repository == "repo-warn-on-complete":
+        if count < 2:
+            return 200, upload_payload(upload_id, repository, "processing")
+        return 200, upload_payload(
+            upload_id, repository, "completed", warnings=["warning_on_complete"], extra=COMPLETED_FIELDS
+        )
+
     if count < 2:
         return 200, upload_payload(upload_id, repository, "processing")
     return 200, upload_payload(upload_id, repository, "completed", extra=COMPLETED_FIELDS)
@@ -107,9 +130,11 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _send_json(self, status, payload):
-        body = json.dumps(payload).encode()
+        self._send_raw(status, json.dumps(payload).encode(), content_type="application/json")
+
+    def _send_raw(self, status, body, content_type="application/json"):
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -117,6 +142,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/oidc-token":
+            with open(STATE["auth_log"] + ".oidc", "a", encoding="utf-8") as fh:
+                fh.write(self.path + "\n")
             self._send_json(200, {"value": "mock-oidc-jwt-token-value"})
             return
         if parsed.path.startswith("/api/ingest/uploads/"):
@@ -151,11 +178,32 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if repository == "repo-422-injection":
+            # Deliberately not JSON: the action echoes the raw response body
+            # verbatim on a non-2xx status, so this simulates a misbehaving
+            # endpoint or intermediary proxy putting real CR/LF/'%' bytes
+            # (not JSON-escaped \n/\r) straight into that body.
+            self._send_raw(
+                422, b'{"error": "invalid_report"}\n::error::injected from server\r::warning::also injected 50% done'
+            )
+            return
+
         if repository == "repo-429-then-ok":
             count = STATE["retry_counts"].get(repository, 0) + 1
             STATE["retry_counts"][repository] = count
             if count <= 2:
                 self._send_json(429, {"error": "busy", "retry_after": 1})
+                return
+
+        if repository == "repo-429-huge-retry-after":
+            self._send_json(429, {"error": "busy", "retry_after": 999999})
+            return
+
+        if repository == "repo-429-negative-retry-after":
+            count = STATE["retry_counts"].get(repository, 0) + 1
+            STATE["retry_counts"][repository] = count
+            if count <= 1:
+                self._send_json(429, {"error": "busy", "retry_after": -5})
                 return
 
         if repository == "repo-500-then-ok":
