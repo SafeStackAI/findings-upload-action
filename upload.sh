@@ -44,6 +44,12 @@ urlencode() {
   jq -rn --arg v "$1" '$v|@uri'
 }
 
+# error_code_of extracts the API's "error" field from a response body,
+# falling back to "unknown_error" for an empty or non-JSON body.
+error_code_of() {
+  echo "$1" | jq -r '.error // "unknown_error"' 2>/dev/null || echo unknown_error
+}
+
 set_output() {
   echo "$1=$2" >>"${GITHUB_OUTPUT}"
 }
@@ -171,7 +177,7 @@ case "${http_status_code}" in
 *)
   error_code="unknown_error"
   if [ "${http_status_code}" != "curl_error" ]; then
-    error_code="$(echo "${body}" | jq -r '.error // "unknown_error"' 2>/dev/null || echo unknown_error)"
+    error_code="$(error_code_of "${body}")"
   fi
   fail_or_warn "upload failed: HTTP ${http_status_code} (${error_code}): ${body}"
   set_output "status" "${error_code}"
@@ -217,6 +223,13 @@ if is_pending "${upload_status}" && [ -n "${status_url}" ]; then
       body="$(cat "${body_file}" 2>/dev/null || echo '{}')"
       final_status="$(echo "${body}" | jq -r '.upload.status // empty')"
       is_pending "${final_status}" || break
+      ;;
+    401 | 403 | 404)
+      poll_body="$(cat "${body_file}" 2>/dev/null || echo '{}')"
+      poll_error_code="$(error_code_of "${poll_body}")"
+      fail_or_warn "polling upload ${upload_id} failed: HTTP ${http_status_code} (${poll_error_code})"
+      final_status="poll_error_${http_status_code}"
+      break
       ;;
     *) ;;
     esac

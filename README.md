@@ -55,7 +55,7 @@ third-party action, and keep the version comment next to it.
 |---|---|
 | `upload-id` | Id of the created upload. |
 | `status-url` | URL to check the upload's processing status later. |
-| `status` | Last known status (`received`, `processing`, `completed`, `failed`, `skipped`, or an API error code if the upload itself was rejected). |
+| `status` | Last known status (`received`, `processing`, `completed`, `failed`, `skipped`, `poll_error_401`/`poll_error_403`/`poll_error_404` if status polling itself failed, or an API error code if the upload itself was rejected). |
 
 ## Authentication
 
@@ -116,6 +116,13 @@ On `429` (rate limited or over quota) or a `5xx`/network error, the action
 retries up to 3 times with backoff, honoring the API's `retry_after` value
 when present. A `4xx` response (bad input, auth, or a parse error) fails
 immediately with the API's error code and detail; it is never retried.
+
+While polling the status URL after a successful upload, a `429` or
+`5xx`/network response is retried the same way, within the existing
+10-attempt, 3-second-interval bound. A `401`, `403`, or `404` response
+while polling is treated as a terminal failure (auth was dropped, or the
+upload genuinely isn't found) and fails immediately per `fail-on-error`,
+rather than being retried as if the upload were still processing.
 
 ## Per-tool examples
 

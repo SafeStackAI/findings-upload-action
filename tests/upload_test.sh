@@ -297,6 +297,47 @@ else
   report "needs_confirmation is surfaced as ::warning::" 1 "rc=${rc} out=${out}"
 fi
 
+# --- poll 403 is a terminal error, not silent "still processing" -------
+
+common_env
+export INPUT_TOKEN="${token_value}"
+export INPUT_REPOSITORY_ID="repo-poll-403"
+rc="$(run_upload poll_403)"
+out="$(cat "${workdir}/poll_403.out")"
+if [ "${rc}" != "0" ] && printf '%s' "${out}" | grep -q "::error::polling upload"; then
+  report "poll 403 fails the job instead of silently retrying forever" 0
+else
+  report "poll 403 fails the job instead of silently retrying forever" 1 "rc=${rc} out=${out}"
+fi
+
+# --- poll 404, with fail-on-error=false, warns and exits 0 -------------
+
+common_env
+export INPUT_TOKEN="${token_value}"
+export INPUT_REPOSITORY_ID="repo-poll-404"
+export INPUT_FAIL_ON_ERROR="false"
+rc="$(run_upload poll_404)"
+out="$(cat "${workdir}/poll_404.out")"
+if [ "${rc}" = "0" ] && printf '%s' "${out}" | grep -q "::warning::polling upload"; then
+  report "poll 404 with fail-on-error=false warns and exits 0" 0
+else
+  report "poll 404 with fail-on-error=false warns and exits 0" 1 "rc=${rc} out=${out}"
+fi
+
+# --- poll 5xx retries within the existing bound, then succeeds ---------
+
+common_env
+export INPUT_TOKEN="${token_value}"
+export INPUT_REPOSITORY_ID="repo-poll-500-then-ok"
+rc="$(run_upload poll_500)"
+out="$(cat "${workdir}/poll_500.out")"
+status="$(output_value poll_500 status)"
+if [ "${rc}" = "0" ] && [ "${status}" = "completed" ]; then
+  report "poll 5xx is retried within the existing bound, then succeeds" 0
+else
+  report "poll 5xx is retried within the existing bound, then succeeds" 1 "rc=${rc} status=${status} out=${out}"
+fi
+
 echo "----"
 echo "${pass_count} passed, ${failures} failed"
 [ "${failures}" -eq 0 ]

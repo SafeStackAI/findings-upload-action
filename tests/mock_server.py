@@ -21,6 +21,10 @@ always `upload-<repository>`):
   repo-needs-confirmation -> 202 received, completed with reconciled false /
                             reconcile_reason needs_confirmation on the 2nd
                             poll.
+  repo-poll-403         -> 202 received, then every poll returns 403.
+  repo-poll-404         -> 202 received, then every poll returns 404.
+  repo-poll-500-then-ok -> 202 received, polls 500 twice, then completes
+                            normally.
   anything else         -> 202 received, then completed on the second poll.
 
 Every Authorization header received on a POST is appended to the auth log
@@ -79,6 +83,19 @@ def poll_response(upload_id, repository, count):
             return 200, upload_payload(upload_id, repository, "processing")
         extra = dict(COMPLETED_FIELDS, closed=12, reconciled=False, reconcile_reason="needs_confirmation")
         return 200, upload_payload(upload_id, repository, "completed", extra=extra)
+
+    if repository == "repo-poll-403":
+        return 403, {"error": "forbidden"}
+
+    if repository == "repo-poll-404":
+        return 404, {"error": "upload_not_found"}
+
+    if repository == "repo-poll-500-then-ok":
+        if count <= 2:
+            return 500, {"error": "internal_error"}
+        if count == 3:
+            return 200, upload_payload(upload_id, repository, "processing")
+        return 200, upload_payload(upload_id, repository, "completed", extra=COMPLETED_FIELDS)
 
     if count < 2:
         return 200, upload_payload(upload_id, repository, "processing")
