@@ -234,7 +234,7 @@ fi
 if [ "${final_status}" = "completed" ]; then
   reconcile_reason="$(echo "${body}" | jq -r '.upload.reconcile_reason // empty' 2>/dev/null || true)"
   if [ "${reconcile_reason}" = "needs_confirmation" ]; then
-    notice "snapshot would close more findings than the shrink guard allows; confirm in the SafeStack UI to apply it"
+    warn "snapshot would close more findings than the shrink guard allows; an owner must confirm this close in the SafeStack UI before it applies"
   fi
 fi
 

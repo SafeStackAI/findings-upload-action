@@ -100,9 +100,9 @@ notice explaining the skip and exits successfully.
 A `snapshot` upload that would close more than half, and more than 10, of a
 scope's open findings is held for owner confirmation rather than applied
 automatically. The upload still succeeds and `completed`, but
-`reconcile_reason` comes back `needs_confirmation`; the action logs a notice
-pointing at the SafeStack UI, since confirming the close is an owner action
-the Action itself cannot take.
+`reconcile_reason` comes back `needs_confirmation`; the action logs a
+warning pointing at the SafeStack UI, since confirming the close is an
+owner action the Action itself cannot take.
 
 ## Size limit
 

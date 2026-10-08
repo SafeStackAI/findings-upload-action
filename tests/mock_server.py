@@ -18,6 +18,9 @@ always `upload-<repository>`):
                             errors[0].reason.
   repo-failed           -> 202 received, then status_reason payload_corrupt
                             on the first poll.
+  repo-needs-confirmation -> 202 received, completed with reconciled false /
+                            reconcile_reason needs_confirmation on the 2nd
+                            poll.
   anything else         -> 202 received, then completed on the second poll.
 
 Every Authorization header received on a POST is appended to the auth log
@@ -31,29 +34,55 @@ from urllib.parse import parse_qs, urlparse
 
 STATE = {"retry_counts": {}, "poll_counts": {}, "auth_log": "/dev/null"}
 
+COMPLETED_FIELDS = {
+    "new": 1,
+    "updated": 0,
+    "closed": 0,
+    "reconciled": True,
+    "reconcile_reason": None,
+    "completed_at": "2026-10-08T00:00:00Z",
+}
 
-def upload_payload(upload_id, repository, status, status_reason=None, warnings=None, errors=None):
-    return {
-        "upload": {
-            "id": upload_id,
-            "status": status,
-            "status_reason": status_reason,
-            "status_url": f"/api/ingest/uploads/{upload_id}",
-            "repository": repository,
-            "ref": "refs/heads/main",
-            "tools": ["semgrep"],
-            "mode": "snapshot",
-            "counts": {
-                "received": 1,
-                "accepted": 1,
-                "dropped": 0,
-                "skipped": 0,
-                "truncated_fields": 0,
-            },
-            "errors": errors or [],
-            "warnings": warnings or [],
-        }
+
+def upload_payload(upload_id, repository, status, status_reason=None, warnings=None, errors=None, extra=None):
+    upload = {
+        "id": upload_id,
+        "status": status,
+        "status_reason": status_reason,
+        "status_url": f"/api/ingest/uploads/{upload_id}",
+        "repository": repository,
+        "ref": "refs/heads/main",
+        "tools": ["semgrep"],
+        "mode": "snapshot",
+        "counts": {
+            "received": 1,
+            "accepted": 1,
+            "dropped": 0,
+            "skipped": 0,
+            "truncated_fields": 0,
+        },
+        "errors": errors or [],
+        "warnings": warnings or [],
     }
+    if extra:
+        upload.update(extra)
+    return {"upload": upload}
+
+
+def poll_response(upload_id, repository, count):
+    """Returns (http_status, payload) for a GET status poll."""
+    if repository == "repo-failed":
+        return 200, upload_payload(upload_id, repository, "failed", status_reason="payload_corrupt")
+
+    if repository == "repo-needs-confirmation":
+        if count < 2:
+            return 200, upload_payload(upload_id, repository, "processing")
+        extra = dict(COMPLETED_FIELDS, closed=12, reconciled=False, reconcile_reason="needs_confirmation")
+        return 200, upload_payload(upload_id, repository, "completed", extra=extra)
+
+    if count < 2:
+        return 200, upload_payload(upload_id, repository, "processing")
+    return 200, upload_payload(upload_id, repository, "completed", extra=COMPLETED_FIELDS)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -75,23 +104,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path.startswith("/api/ingest/uploads/"):
             upload_id = parsed.path.rsplit("/", 1)[-1]
-            if upload_id == "upload-repo-failed":
-                self._send_json(
-                    200, upload_payload(upload_id, "repo-failed", "failed", status_reason="payload_corrupt")
-                )
-                return
+            prefix = "upload-"
+            repository = upload_id[len(prefix):] if upload_id.startswith(prefix) else upload_id
             count = STATE["poll_counts"].get(upload_id, 0) + 1
             STATE["poll_counts"][upload_id] = count
-            status = "processing" if count < 2 else "completed"
-            payload = upload_payload(upload_id, "repo-ok", status)
-            if status == "completed":
-                payload["upload"]["new"] = 1
-                payload["upload"]["updated"] = 0
-                payload["upload"]["closed"] = 0
-                payload["upload"]["reconciled"] = True
-                payload["upload"]["reconcile_reason"] = None
-                payload["upload"]["completed_at"] = "2026-10-08T00:00:00Z"
-            self._send_json(200, payload)
+            status_code, payload = poll_response(upload_id, repository, count)
+            self._send_json(status_code, payload)
             return
         self._send_json(404, {"error": "not_found"})
 

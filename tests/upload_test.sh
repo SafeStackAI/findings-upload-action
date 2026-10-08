@@ -283,6 +283,20 @@ else
     "rc=${rc} upload_id=${upload_id}: $(cat "${workdir}/dash_filename.out")"
 fi
 
+# --- needs_confirmation is surfaced as ::warning::, not ::notice:: ------
+
+common_env
+export INPUT_TOKEN="${token_value}"
+export INPUT_REPOSITORY_ID="repo-needs-confirmation"
+rc="$(run_upload needs_confirmation)"
+out="$(cat "${workdir}/needs_confirmation.out")"
+if [ "${rc}" = "0" ] && printf '%s' "${out}" | grep -q "::warning::.*shrink guard" &&
+  ! printf '%s' "${out}" | grep -q "::notice::.*shrink guard"; then
+  report "needs_confirmation is surfaced as ::warning::" 0
+else
+  report "needs_confirmation is surfaced as ::warning::" 1 "rc=${rc} out=${out}"
+fi
+
 echo "----"
 echo "${pass_count} passed, ${failures} failed"
 [ "${failures}" -eq 0 ]
