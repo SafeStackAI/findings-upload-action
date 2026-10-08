@@ -4,6 +4,7 @@
 # Runnable locally: tests/upload_test.sh
 set -euo pipefail
 
+original_dir="$(pwd)"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 action_dir="$(cd "${script_dir}/.." && pwd)"
 upload_script="${action_dir}/upload.sh"
@@ -91,7 +92,7 @@ run_upload() {
 }
 
 output_value() {
-  grep "^$2=" "${workdir}/$1.outputs" | tail -1 | cut -d= -f2-
+  grep "^$2=" "${workdir}/$1.outputs" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
 # --- token auth happy path + 202 then poll to completed --------------
@@ -260,6 +261,26 @@ if [ "${rc}" != "0" ] && printf '%s' "${out}" | grep -q "payload_corrupt"; then
   report "failed upload surfaces status_reason and fails per fail-on-error" 0
 else
   report "failed upload surfaces status_reason and fails per fail-on-error" 1 "rc=${rc} out=${out}"
+fi
+
+# --- filename starting with '-' doesn't break gzip/sha256sum -----------
+
+dash_dir="${workdir}/dashtest"
+mkdir -p "${dash_dir}"
+cp "${fixture}" "${dash_dir}/-dash-report.json"
+common_env
+export INPUT_TOKEN="${token_value}"
+export INPUT_REPOSITORY_ID="repo-ok"
+export INPUT_FILE="-dash-report.json"
+cd "${dash_dir}" || exit 1
+rc="$(run_upload dash_filename)"
+cd "${original_dir}" || exit 1
+upload_id="$(output_value dash_filename upload-id)"
+if [ "${rc}" = "0" ] && [ -n "${upload_id}" ]; then
+  report "filename starting with '-' uploads successfully" 0
+else
+  report "filename starting with '-' uploads successfully" 1 \
+    "rc=${rc} upload_id=${upload_id}: $(cat "${workdir}/dash_filename.out")"
 fi
 
 echo "----"
