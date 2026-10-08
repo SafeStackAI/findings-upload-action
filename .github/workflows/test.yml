@@ -1,0 +1,165 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# Cancel a superseded run on the same ref instead of racing it to completion.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SHFMT_VERSION: "v3.14.1"
+  SHFMT_SHA256: "76e77641faa025814b77f153b29796b8e6fa2fca03e0c76a691608b86c7ea7bf"
+  ACTIONLINT_VERSION: "1.7.12"
+  ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+  ZIZMOR_VERSION: "v1.30.1"
+  ZIZMOR_SHA256: "e65324f4430c2717591937edcec90ccbefaf14c174f8ec9415e03ca875b46e1a"
+  SEMGREP_VERSION: "1.180.0"
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install shfmt
+        run: |
+          curl -fsSL -o /tmp/shfmt "https://github.com/mvdan/sh/releases/download/${SHFMT_VERSION}/shfmt_${SHFMT_VERSION}_linux_amd64"
+          echo "${SHFMT_SHA256}  /tmp/shfmt" | sha256sum -c -
+          chmod +x /tmp/shfmt
+          sudo mv /tmp/shfmt /usr/local/bin/shfmt
+
+      - name: Install actionlint
+        run: |
+          curl -fsSL -o /tmp/actionlint.tar.gz "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  /tmp/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          chmod +x /tmp/actionlint
+          sudo mv /tmp/actionlint /usr/local/bin/actionlint
+
+      - name: Install zizmor
+        run: |
+          curl -fsSL -o /tmp/zizmor.tar.gz "https://github.com/woodruffw/zizmor/releases/download/${ZIZMOR_VERSION}/zizmor-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${ZIZMOR_SHA256}  /tmp/zizmor.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/zizmor.tar.gz -C /tmp zizmor
+          chmod +x /tmp/zizmor
+          sudo mv /tmp/zizmor /usr/local/bin/zizmor
+
+      - name: shellcheck
+        run: shellcheck upload.sh tests/upload_test.sh
+
+      - name: shfmt
+        run: shfmt -d -i 2 upload.sh tests/upload_test.sh
+
+      - name: actionlint
+        run: actionlint .github/workflows/*.yml
+
+      - name: zizmor
+        run: zizmor .github/workflows/ action.yml
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run local test suite against the mock server
+        run: bash tests/upload_test.sh
+
+  # Runs real uploads against a staging SafeStack instance. Disabled until
+  # the SAFESTACK_STAGING_API_URL and SAFESTACK_SMOKE_REPOSITORY_ID
+  # repository variables and the SAFESTACK_SMOKE_SCANNER_TOKEN secret are
+  # configured; see README.md.
+  smoke:
+    name: smoke (staging)
+    if: ${{ vars.ENABLE_STAGING_SMOKE == 'true' }}
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # requests the OIDC id-token used by the "Upload with OIDC" step below
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install semgrep
+        run: pip install --no-input "semgrep==${SEMGREP_VERSION}"
+
+      - name: Scan the fixture directory with semgrep
+        run: semgrep --lang python --pattern 'eval(...)' --json --output semgrep-report.json tests/fixtures/src
+
+      - name: Upload with OIDC
+        id: upload_oidc
+        uses: ./
+        with:
+          file: semgrep-report.json
+          format: semgrep
+          repository-id: ${{ vars.SAFESTACK_SMOKE_REPOSITORY_ID }}
+          api-url: ${{ vars.SAFESTACK_STAGING_API_URL }}
+
+      - name: Assert upload-id is set (OIDC)
+        env:
+          UPLOAD_ID: ${{ steps.upload_oidc.outputs.upload-id }}
+        run: |
+          if [ -z "${UPLOAD_ID}" ]; then
+            echo "::error::upload-id output was not set for the OIDC upload"
+            exit 1
+          fi
+
+      - name: Upload with a scanner token
+        id: upload_token
+        uses: ./
+        with:
+          file: semgrep-report.json
+          format: semgrep
+          repository-id: ${{ vars.SAFESTACK_SMOKE_REPOSITORY_ID }}
+          api-url: ${{ vars.SAFESTACK_STAGING_API_URL }}
+          token: ${{ secrets.SAFESTACK_SMOKE_SCANNER_TOKEN }}
+
+      - name: Assert upload-id is set (token)
+        env:
+          UPLOAD_ID: ${{ steps.upload_token.outputs.upload-id }}
+        run: |
+          if [ -z "${UPLOAD_ID}" ]; then
+            echo "::error::upload-id output was not set for the token upload"
+            exit 1
+          fi
+
+      - name: Upload a broken file (expected to fail)
+        id: upload_broken
+        continue-on-error: true
+        uses: ./
+        with:
+          file: tests/fixtures/broken-report.json
+          format: semgrep
+          repository-id: ${{ vars.SAFESTACK_SMOKE_REPOSITORY_ID }}
+          api-url: ${{ vars.SAFESTACK_STAGING_API_URL }}
+          token: ${{ secrets.SAFESTACK_SMOKE_SCANNER_TOKEN }}
+
+      - name: Check that the broken upload failed
+        env:
+          BROKEN_OUTCOME: ${{ steps.upload_broken.outcome }}
+        run: |
+          if [ "${BROKEN_OUTCOME}" = "success" ]; then
+            echo "::error::expected the broken-report upload to fail"
+            exit 1
+          fi

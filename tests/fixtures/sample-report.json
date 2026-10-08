@@ -1,0 +1,11 @@
+{
+  "results": [
+    {
+      "check_id": "fixture.sample-rule",
+      "path": "src/app.py",
+      "start": { "line": 10, "col": 1 },
+      "end": { "line": 10, "col": 20 },
+      "extra": { "message": "fixture finding for local action tests" }
+    }
+  ]
+}
