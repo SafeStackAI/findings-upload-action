@@ -109,7 +109,9 @@ jobs:
 
       - name: Upload with OIDC
         id: upload_oidc
-        uses: ./
+        # No earlier step fetches code, so ./ can only load this checkout. The $/ form
+        # zizmor prefers is not accepted by actionlint yet (rhysd/actionlint#711).
+        uses: ./ # zizmor: ignore[self-repository]
         with:
           file: semgrep-report.json
           format: semgrep
@@ -127,7 +129,9 @@ jobs:
 
       - name: Upload with a scanner token
         id: upload_token
-        uses: ./
+        # No earlier step fetches code, so ./ can only load this checkout. The $/ form
+        # zizmor prefers is not accepted by actionlint yet (rhysd/actionlint#711).
+        uses: ./ # zizmor: ignore[self-repository]
         with:
           file: semgrep-report.json
           format: semgrep
@@ -147,7 +151,9 @@ jobs:
       - name: Upload a broken file (expected to fail)
         id: upload_broken
         continue-on-error: true
-        uses: ./
+        # No earlier step fetches code, so ./ can only load this checkout. The $/ form
+        # zizmor prefers is not accepted by actionlint yet (rhysd/actionlint#711).
+        uses: ./ # zizmor: ignore[self-repository]
         with:
           file: tests/fixtures/broken-report.json
           format: semgrep
