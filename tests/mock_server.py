@@ -38,10 +38,18 @@ always `upload-<repository>`):
                                  completes normally.
   repo-warn-on-complete      -> 202 received with no warnings, completed
                                  with a warning on the 2nd poll.
+  repo-dropped               -> 202 received, then completed on the 2nd
+                                 poll with counts.dropped=18 and
+                                 reconcile_reason dropped_findings, and
+                                 errors[] carrying bad_path reasons plus one
+                                 reason with a raw newline, "::" text, and a
+                                 literal "%0A" to check escaping.
   anything else              -> 202 received, then completed on 2nd poll.
 
 Every Authorization header received on a POST is appended to the auth log
 file, one per line, so tests can assert which credential was actually sent.
+Every POST's full request path (including its query string, so the
+source_root param can be asserted) is appended to `<auth-log-path>.requests`.
 Every GET to /oidc-token appends the request path (including its query
 string) to `<auth-log-path>.oidc`, so tests can assert the audience param
 was encoded correctly.
@@ -120,6 +128,31 @@ def poll_response(upload_id, repository, count):
             upload_id, repository, "completed", warnings=["warning_on_complete"], extra=COMPLETED_FIELDS
         )
 
+    if repository == "repo-dropped":
+        if count < 2:
+            return 200, upload_payload(upload_id, repository, "processing")
+        extra = {
+            "new": 0,
+            "updated": 0,
+            "closed": 0,
+            "reconciled": False,
+            "reconcile_reason": "dropped_findings",
+            "completed_at": "2026-10-08T00:00:00Z",
+            "counts": {
+                "received": 18,
+                "accepted": 0,
+                "dropped": 18,
+                "skipped": 0,
+                "truncated_fields": 0,
+            },
+        }
+        errors = [
+            {"index": 0, "reason": "bad_path"},
+            {"index": 1, "reason": "line1\nline2::warning::nested"},
+            {"index": 2, "reason": "literal %0A and :: text"},
+        ]
+        return 200, upload_payload(upload_id, repository, "completed", errors=errors, extra=extra)
+
     if count < 2:
         return 200, upload_payload(upload_id, repository, "processing")
     return 200, upload_payload(upload_id, repository, "completed", extra=COMPLETED_FIELDS)
@@ -166,6 +199,8 @@ class Handler(BaseHTTPRequestHandler):
 
         with open(STATE["auth_log"], "a", encoding="utf-8") as fh:
             fh.write(self.headers.get("Authorization", "") + "\n")
+        with open(STATE["auth_log"] + ".requests", "a", encoding="utf-8") as fh:
+            fh.write(self.path + "\n")
 
         if repository == "repo-422":
             self._send_json(

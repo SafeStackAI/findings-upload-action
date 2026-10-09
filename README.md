@@ -41,13 +41,15 @@ third-party action, and keep the version comment next to it.
 | `mode` | no | `snapshot` | `snapshot` (authoritative for the scope; closes findings not seen) or `delta` (adds/updates only). |
 | `scope` | no | `""` | Optional scope label, for splitting one repository's findings into independent reconciliation groups (for example per service in a monorepo). |
 | `category` | no | `""` | `sast`, `sca`, `secret`, or `iac`. |
+| `source-root` | no | `""` | Override for the repository root the scanner saw. Defaults to `$GITHUB_WORKSPACE`; set it when the scanner ran under a different root, such as a container action's own mount (see [gosec](#gosec)). |
 | `token` | no | `""` | A scanner token. When omitted, the action requests a GitHub OIDC token instead. |
 | `api-url` | no | `https://api.safestackai.com` | SafeStack API base URL. |
 | `audience` | no | `https://api.safestackai.com` | OIDC audience requested from GitHub. Ignored when `token` is set. |
 | `fail-on-error` | no | `true` | When `false`, a rejected or failed upload is logged as a warning instead of failing the job. |
 
-`ref`, `commit_sha`, and `source_root` are set automatically from
-`$GITHUB_REF`, `$GITHUB_SHA`, and `$GITHUB_WORKSPACE`; they are not inputs.
+`ref` and `commit_sha` are set automatically from `$GITHUB_REF` and
+`$GITHUB_SHA`; they are not inputs. `source_root` defaults to
+`$GITHUB_WORKSPACE` but can be overridden with the `source-root` input.
 
 ## Outputs
 
@@ -104,6 +106,23 @@ automatically. The upload still succeeds and `completed`, but
 warning pointing at the SafeStack UI, since confirming the close is an
 owner action the Action itself cannot take.
 
+## Dropped findings
+
+Each finding in the report is validated on its own; one with a path the
+API can't resolve against `source_root` (reported as `bad_path`) or that
+resolves outside it (`path_escapes_root`) is dropped rather than failing
+the whole upload. The upload itself still completes, and the action does
+not fail the step for this.
+
+If any findings were dropped, the action logs a `::warning::` with the
+drop count and the first few reasons from the API's response. If a
+`snapshot` upload dropped every finding it needed to reconcile, the API
+returns `reconcile_reason: dropped_findings`; the warning adds that the
+snapshot closed nothing because of the drops. If a reported reason is
+`bad_path` or `path_escapes_root`, the warning also points at the
+`source-root` input, since that is almost always a path-root mismatch
+between the scanner and `$GITHUB_WORKSPACE` (see [gosec](#gosec)).
+
 ## Size limit
 
 The gzipped report must be under 25 MB. The action checks this locally,
@@ -143,9 +162,30 @@ Each snippet produces the report file this action then uploads. Replace
 
 ### gosec
 
-Run without `-quiet`; a quiet run can suppress findings a native-id upload
-needs for stable identity across runs. Pass `source_root` is handled by the
-action automatically; just give it an absolute-path-free report.
+Run without `-quiet`: a clean scan with `-quiet` writes an empty report
+body, which the API rejects with a 422.
+
+gosec writes absolute paths in its native output, so set `source-root` to
+the path gosec saw as the repository root, or every finding is dropped as
+`bad_path`. For the official `securego/gosec` action, which runs gosec
+inside its own container, that path is the container's own mount,
+`/github/workspace`, not the runner's `$GITHUB_WORKSPACE`:
+
+```yaml
+      - uses: securego/gosec@<pinned-sha> # vX.Y.Z
+        with:
+          args: -fmt json -out report.json ./...
+      - uses: SafeStackAI/findings-upload-action@<pinned-sha> # vX.Y.Z
+        with:
+          file: report.json
+          format: gosec
+          repository-id: ${{ vars.SAFESTACK_REPOSITORY_ID }}
+          source-root: /github/workspace
+```
+
+Running the `gosec` binary directly on the runner instead, the default
+(`$GITHUB_WORKSPACE`) is already the right root, so `source-root` can be
+left unset:
 
 ```yaml
       - run: gosec -fmt json -out report.json ./...
