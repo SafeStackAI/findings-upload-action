@@ -89,7 +89,9 @@ jobs:
   # configured; see README.md.
   smoke:
     name: smoke (staging)
-    if: ${{ vars.ENABLE_STAGING_SMOKE == 'true' }}
+    # Only on pushes to main: this job may mint an OIDC token, and pull_request
+    # runs can come from forks.
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.ENABLE_STAGING_SMOKE == 'true' }}
     needs: [lint, test]
     runs-on: ubuntu-latest
     permissions:
