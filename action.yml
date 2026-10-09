@@ -22,6 +22,10 @@ inputs:
     description: "Optional finding category: sast, sca, secret, or iac."
     required: false
     default: ""
+  source-root:
+    description: "Override for the repository root the scanner saw, used to validate and rewrite each finding's path. Defaults to $GITHUB_WORKSPACE; set this when the scanner ran under a different root, such as a container action's own mount."
+    required: false
+    default: ""
   token:
     description: "Scanner token. When omitted, GitHub OIDC is used instead, which requires permissions: id-token: write."
     required: false
@@ -61,6 +65,7 @@ runs:
         INPUT_MODE: ${{ inputs.mode }}
         INPUT_SCOPE: ${{ inputs.scope }}
         INPUT_CATEGORY: ${{ inputs.category }}
+        INPUT_SOURCE_ROOT: ${{ inputs.source-root }}
         INPUT_TOKEN: ${{ inputs.token }}
         INPUT_API_URL: ${{ inputs.api-url }}
         INPUT_AUDIENCE: ${{ inputs.audience }}

@@ -124,6 +124,12 @@ output_value() {
   grep "^$2=" "${workdir}/$1.outputs" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
+# test_urlencode <value> -> percent-encodes <value> the same way upload.sh's
+# own urlencode() does, so a test can match the exact query string sent.
+test_urlencode() {
+  jq -rn --arg v "$1" '$v|@uri'
+}
+
 # --- token auth happy path + 202 then poll to completed --------------
 
 common_env
@@ -457,6 +463,60 @@ if [ "${rc}" != "0" ] && printf '%s' "${out}" | grep -qi "no-such-runner-temp"; 
   report "the temp workdir is created under RUNNER_TEMP" 0
 else
   report "the temp workdir is created under RUNNER_TEMP" 1 "rc=${rc} out=${out}"
+fi
+
+# --- source-root defaults to GITHUB_WORKSPACE when unset ---------------
+
+common_env
+export INPUT_TOKEN="${token_value}"
+export INPUT_REPOSITORY_ID="repo-ok"
+unset INPUT_SOURCE_ROOT
+rc="$(run_upload source_root_default)"
+request_line="$(tail -1 "${auth_log}.requests" 2>/dev/null || true)"
+expected="source_root=$(test_urlencode "${workdir}")"
+if [ "${rc}" = "0" ] && printf '%s' "${request_line}" | grep -q -- "${expected}"; then
+  report "source-root defaults to GITHUB_WORKSPACE when unset" 0
+else
+  report "source-root defaults to GITHUB_WORKSPACE when unset" 1 "rc=${rc} request_line=${request_line} expected=${expected}"
+fi
+
+# --- source-root input overrides GITHUB_WORKSPACE in the outgoing query ---
+
+common_env
+export INPUT_TOKEN="${token_value}"
+export INPUT_REPOSITORY_ID="repo-ok"
+export INPUT_SOURCE_ROOT="/github/workspace"
+rc="$(run_upload source_root_override)"
+request_line="$(tail -1 "${auth_log}.requests" 2>/dev/null || true)"
+expected="source_root=$(test_urlencode "/github/workspace")"
+unexpected="source_root=$(test_urlencode "${workdir}")"
+if [ "${rc}" = "0" ] && printf '%s' "${request_line}" | grep -q -- "${expected}" &&
+  ! printf '%s' "${request_line}" | grep -q -- "${unexpected}"; then
+  report "source-root input overrides the default GITHUB_WORKSPACE" 0
+else
+  report "source-root input overrides the default GITHUB_WORKSPACE" 1 "rc=${rc} request_line=${request_line}"
+fi
+unset INPUT_SOURCE_ROOT
+
+# --- dropped findings warn with count, reasons, the dropped_findings ---
+# --- reconcile note, and the source-root hint, without failing the step -
+
+common_env
+export INPUT_TOKEN="${token_value}"
+export INPUT_REPOSITORY_ID="repo-dropped"
+rc="$(run_upload dropped_findings)"
+out="$(cat "${workdir}/dropped_findings.out")"
+command_lines="$(printf '%s\n' "${out}" | grep -c -- '^::\(warning\|error\)::' || true)"
+if [ "${rc}" = "0" ] && [ "${command_lines}" = "1" ] &&
+  printf '%s' "${out}" | grep -q -- "::warning::18 finding" &&
+  printf '%s' "${out}" | grep -q -- "bad_path" &&
+  printf '%s' "${out}" | grep -q -- "did not close" &&
+  printf '%s' "${out}" | grep -q -- "source-root" &&
+  printf '%s' "${out}" | grep -q -- "line1%0Aline2::warning::nested" &&
+  printf '%s' "${out}" | grep -q -- "literal %250A and :: text"; then
+  report "dropped findings warn with count, reasons, reconcile note and source-root hint" 0
+else
+  report "dropped findings warn with count, reasons, reconcile note and source-root hint" 1 "rc=${rc} out=${out}"
 fi
 
 echo "----"

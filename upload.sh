@@ -88,6 +88,7 @@ repository_id="${INPUT_REPOSITORY_ID:?repository-id input is required}"
 mode="${INPUT_MODE:-snapshot}"
 scope="${INPUT_SCOPE:-}"
 category="${INPUT_CATEGORY:-}"
+source_root_override="${INPUT_SOURCE_ROOT:-}"
 token="${INPUT_TOKEN:-}"
 api_url="${INPUT_API_URL:-https://api.safestackai.com}"
 audience="${INPUT_AUDIENCE:-https://api.safestackai.com}"
@@ -127,7 +128,7 @@ idempotency_key="${GITHUB_RUN_ID:-0}-${GITHUB_RUN_ATTEMPT:-1}-${file_hash}"
 
 ref="${GITHUB_REF:?GITHUB_REF is not set}"
 commit_sha="${GITHUB_SHA:?GITHUB_SHA is not set}"
-source_root="${GITHUB_WORKSPACE:-}"
+source_root="${source_root_override:-${GITHUB_WORKSPACE:-}}"
 
 query="repository=$(urlencode "${repository_id}")"
 query="${query}&ref=$(urlencode "${ref}")"
@@ -295,6 +296,26 @@ if [ "${final_status}" = "completed" ]; then
   reconcile_reason="$(echo "${body}" | jq -r '.upload.reconcile_reason // empty' 2>/dev/null || true)"
   if [ "${reconcile_reason}" = "needs_confirmation" ]; then
     warn "snapshot would close more findings than the shrink guard allows; an owner must confirm this close in the SafeStack UI before it applies"
+  fi
+
+  dropped_count="$(echo "${body}" | jq -r '.upload.counts.dropped // 0' 2>/dev/null || echo 0)"
+  case "${dropped_count}" in
+  '' | *[!0-9]*) dropped_count=0 ;;
+  esac
+  if [ "${dropped_count}" -gt 0 ]; then
+    drop_reasons_shown="$(echo "${body}" | jq -r '[.upload.errors[]?.reason][0:3] | join(", ")' 2>/dev/null || true)"
+    drop_reasons_all="$(echo "${body}" | jq -r '[.upload.errors[]?.reason] | join(",")' 2>/dev/null || true)"
+    drop_message="${dropped_count} finding(s) were dropped during upload ${upload_id}"
+    [ -n "${drop_reasons_shown}" ] && drop_message="${drop_message}: ${drop_reasons_shown}"
+    if [ "${reconcile_reason}" = "dropped_findings" ]; then
+      drop_message="${drop_message}; the snapshot did not close any findings because some findings were dropped"
+    fi
+    case "${drop_reasons_all}" in
+    *bad_path* | *path_escapes_root*)
+      drop_message="${drop_message}; check the source-root input matches the path the scanner saw as the repository root"
+      ;;
+    esac
+    warn "${drop_message}"
   fi
 fi
 
